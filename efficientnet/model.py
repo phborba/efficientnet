@@ -92,7 +92,8 @@ DENSE_KERNEL_INITIALIZER = {
 
 
 def preprocess_input(x, **kwargs):
-    kwargs = {k: v for k, v in kwargs.items() if k in ['backend', 'layers', 'models', 'utils']}
+    kwargs = {k: v for k, v in kwargs.items() if k in [
+        'backend', 'layers', 'models', 'utils']}
     return _preprocess_input(x, mode='torch', **kwargs)
 
 
@@ -144,7 +145,8 @@ def round_filters(filters, width_coefficient, depth_divisor):
     """Round number of filters based on width multiplier."""
 
     filters *= width_coefficient
-    new_filters = int(filters + depth_divisor / 2) // depth_divisor * depth_divisor
+    new_filters = int(filters + depth_divisor /
+                      2) // depth_divisor * depth_divisor
     new_filters = max(depth_divisor, new_filters)
     # Make sure that round down does not go down by more than 10%.
     if new_filters < 0.9 * filters:
@@ -158,10 +160,11 @@ def round_repeats(repeats, depth_coefficient):
     return int(math.ceil(depth_coefficient * repeats))
 
 
-def mb_conv_block(inputs, block_args, activation, drop_rate=None, prefix='', ):
+def mb_conv_block(inputs, block_args, activation, drop_rate=None, prefix='', activation_dtype=None):
     """Mobile Inverted Residual Bottleneck."""
 
-    has_se = (block_args.se_ratio is not None) and (0 < block_args.se_ratio <= 1)
+    has_se = (block_args.se_ratio is not None) and (
+        0 < block_args.se_ratio <= 1)
     bn_axis = 3 if backend.image_data_format() == 'channels_last' else 1
 
     # workaround over non working dropout with None in noise_shape in tf.keras
@@ -180,8 +183,14 @@ def mb_conv_block(inputs, block_args, activation, drop_rate=None, prefix='', ):
                           use_bias=False,
                           kernel_initializer=CONV_KERNEL_INITIALIZER,
                           name=prefix + 'expand_conv')(inputs)
-        x = layers.BatchNormalization(axis=bn_axis, name=prefix + 'expand_bn')(x)
-        x = layers.Activation(activation, name=prefix + 'expand_activation')(x)
+        x = layers.BatchNormalization(
+            axis=bn_axis, name=prefix + 'expand_bn')(x)
+        if activation_dtype is None:
+            x = layers.Activation(
+                activation, name=prefix + 'expand_activation')(x)
+        else:
+            x = layers.Activation(
+                activation, name=prefix + 'expand_activation', dtype=activation_dtype)(x)
     else:
         x = inputs
 
@@ -193,23 +202,39 @@ def mb_conv_block(inputs, block_args, activation, drop_rate=None, prefix='', ):
                                depthwise_initializer=CONV_KERNEL_INITIALIZER,
                                name=prefix + 'dwconv')(x)
     x = layers.BatchNormalization(axis=bn_axis, name=prefix + 'bn')(x)
-    x = layers.Activation(activation, name=prefix + 'activation')(x)
+    if activation_dtype is None:
+        x = layers.Activation(activation, name=prefix + 'activation')(x)
+    else:
+        x = layers.Activation(activation, name=prefix +
+                              'activation', dtype=activation_dtype)(x)
 
     # Squeeze and Excitation phase
     if has_se:
         num_reduced_filters = max(1, int(
             block_args.input_filters * block_args.se_ratio
         ))
-        se_tensor = layers.GlobalAveragePooling2D(name=prefix + 'se_squeeze')(x)
+        se_tensor = layers.GlobalAveragePooling2D(
+            name=prefix + 'se_squeeze')(x)
 
-        target_shape = (1, 1, filters) if backend.image_data_format() == 'channels_last' else (filters, 1, 1)
-        se_tensor = layers.Reshape(target_shape, name=prefix + 'se_reshape')(se_tensor)
-        se_tensor = layers.Conv2D(num_reduced_filters, 1,
-                                  activation=activation,
-                                  padding='same',
-                                  use_bias=True,
-                                  kernel_initializer=CONV_KERNEL_INITIALIZER,
-                                  name=prefix + 'se_reduce')(se_tensor)
+        target_shape = (1, 1, filters) if backend.image_data_format(
+        ) == 'channels_last' else (filters, 1, 1)
+        se_tensor = layers.Reshape(
+            target_shape, name=prefix + 'se_reshape')(se_tensor)
+        if activation_dtype is None:
+            se_tensor = layers.Conv2D(num_reduced_filters, 1,
+                                      activation=activation,
+                                      padding='same',
+                                      use_bias=True,
+                                      kernel_initializer=CONV_KERNEL_INITIALIZER,
+                                      name=prefix + 'se_reduce')(se_tensor)
+        else:
+            se_tensor = layers.Conv2D(num_reduced_filters, 1,
+                                      padding='same',
+                                      use_bias=True,
+                                      kernel_initializer=CONV_KERNEL_INITIALIZER
+                                      )(se_tensor)
+            se_tensor = layers.Activation(
+                activation, name=prefix + 'se_reduce', dtype=activation_dtype)(se_tensor)
         se_tensor = layers.Conv2D(filters, 1,
                                   activation='sigmoid',
                                   padding='same',
@@ -259,6 +284,7 @@ def EfficientNet(width_coefficient,
                  input_shape=None,
                  pooling=None,
                  classes=1000,
+                 activation_dtype=None,
                  **kwargs):
     """Instantiates the EfficientNet architecture using given scaling coefficients.
     Optionally loads weights pre-trained on ImageNet.
@@ -298,6 +324,8 @@ def EfficientNet(width_coefficient,
         classes: optional number of classes to classify images
             into, only to be specified if `include_top` is True, and
             if no `weights` argument is specified.
+        activation_dtype: Optional type parameter to force activations
+            to be treated in certain type. Used when mixed_precision is enabled.
     # Returns
         A Keras model instance.
     # Raises
@@ -349,7 +377,11 @@ def EfficientNet(width_coefficient,
                       kernel_initializer=CONV_KERNEL_INITIALIZER,
                       name='stem_conv')(x)
     x = layers.BatchNormalization(axis=bn_axis, name='stem_bn')(x)
-    x = layers.Activation(activation, name='stem_activation')(x)
+    if activation_dtype is None:
+        x = layers.Activation(activation, name='stem_activation')(x)
+    else:
+        x = layers.Activation(
+            activation, name='stem_activation', dtype=activation_dtype)(x)
 
     # Build blocks
     num_blocks_total = sum(block_args.num_repeat for block_args in blocks_args)
@@ -369,7 +401,9 @@ def EfficientNet(width_coefficient,
         x = mb_conv_block(x, block_args,
                           activation=activation,
                           drop_rate=drop_rate,
-                          prefix='block{}a_'.format(idx + 1))
+                          prefix='block{}a_'.format(idx + 1),
+                          activation_dtype=activation_dtype
+                          )
         block_num += 1
         if block_args.num_repeat > 1:
             # pylint: disable=protected-access
@@ -377,7 +411,8 @@ def EfficientNet(width_coefficient,
                 input_filters=block_args.output_filters, strides=[1, 1])
             # pylint: enable=protected-access
             for bidx in xrange(block_args.num_repeat - 1):
-                drop_rate = drop_connect_rate * float(block_num) / num_blocks_total
+                drop_rate = drop_connect_rate * \
+                    float(block_num) / num_blocks_total
                 block_prefix = 'block{}{}_'.format(
                     idx + 1,
                     string.ascii_lowercase[bidx + 1]
@@ -385,7 +420,9 @@ def EfficientNet(width_coefficient,
                 x = mb_conv_block(x, block_args,
                                   activation=activation,
                                   drop_rate=drop_rate,
-                                  prefix=block_prefix)
+                                  prefix=block_prefix,
+                                  activation_dtype=activation_dtype
+                                  )
                 block_num += 1
 
     # Build top
@@ -395,15 +432,25 @@ def EfficientNet(width_coefficient,
                       kernel_initializer=CONV_KERNEL_INITIALIZER,
                       name='top_conv')(x)
     x = layers.BatchNormalization(axis=bn_axis, name='top_bn')(x)
-    x = layers.Activation(activation, name='top_activation')(x)
+    if activation_dtype is None:
+        x = layers.Activation(activation, name='top_activation')(x)
+    else:
+        x = layers.Activation(
+            activation, name='top_activation', dtype=activation_dtype)(x)
     if include_top:
         x = layers.GlobalAveragePooling2D(name='avg_pool')(x)
         if dropout_rate and dropout_rate > 0:
             x = layers.Dropout(dropout_rate, name='top_dropout')(x)
-        x = layers.Dense(classes,
-                         activation='softmax',
-                         kernel_initializer=DENSE_KERNEL_INITIALIZER,
-                         name='probs')(x)
+        if activation_dtype is None:
+            x = layers.Dense(classes,
+                             activation='softmax',
+                             kernel_initializer=DENSE_KERNEL_INITIALIZER,
+                             name='probs')(x)
+        else:
+            x = layers.Dense(classes,
+                             kernel_initializer=DENSE_KERNEL_INITIALIZER)(x)
+            x = layers.Activation(
+                'softmax', dtype=activation_dtype, name='probs')(x)
     else:
         if pooling == 'avg':
             x = layers.GlobalAveragePooling2D(name='avg_pool')(x)
